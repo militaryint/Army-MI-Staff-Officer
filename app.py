@@ -1,81 +1,88 @@
-import os
-import importlib
+import os, importlib
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# ----------------------------
-# CONFIG
-# ----------------------------
-APP_PASSWORD = "CommanderKeshav"
-VECTORSTORE_PATH = "vectorstore"
+# ---------- Config ----------
+VERSION_TAG = "VT-2025-08-26-1"
+APP_PASSWORD = "CommanderKeshav"          # upload gate
+VECTORSTORE_DIR = "vectorstore"            # folder, not a single file
 PDF_LIST_FILE = "trained_pdfs.txt"
+UPLOADS_DIR = "uploads"
 
-if "auth" not in st.session_state:
-    st.session_state.auth = False
+# ---------- Boot ----------
+load_dotenv()
+st.set_page_config(page_title="Virtual Teacher", layout="wide")
+st.title("📚 Virtual Teacher — Multi-PDF Knowledge Base")
+st.caption(f"Build: {VERSION_TAG} • Main file: {__file__}")
 
-# ----------------------------
-# SAFE PDF LOADER IMPORT
-# ----------------------------
-def get_pypdf_loader():
-    try:
-        loader_module = importlib.import_module("langchain_community.document_loaders")
-    except ModuleNotFoundError:
-        loader_module = importlib.import_module("langchain.document_loaders")
-    return loader_module.PyPDFLoader
+# ---------- Safe imports for LangChain/OpenAI ----------
+# (Works with both new + old LangChain integrations)
+try:
+    from langchain_openai import ChatOpenAI, OpenAIEmbeddings  # new style
+except Exception:
+    from langchain.chat_models import ChatOpenAI               # fallback
+    from langchain.embeddings import OpenAIEmbeddings
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
-from langchain.chat_models import ChatOpenAI
 
-# ----------------------------
-# STREAMLIT PAGE CONFIG
-# ----------------------------
-st.set_page_config(page_title="Virtual Teacher", layout="wide")
-st.title("📚 Virtual Teacher - Multi-PDF Knowledge Base")
+def get_pypdf_loader():
+    """Import PyPDFLoader lazily to avoid ModuleNotFoundError on deploy."""
+    try:
+        mod = importlib.import_module("langchain_community.document_loaders")
+    except ModuleNotFoundError:
+        mod = importlib.import_module("langchain.document_loaders")
+    return mod.PyPDFLoader
 
-# Get API key from .env
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    st.error("OpenAI API key not found in .env file.")
+# ---------- API key ----------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("OPENAI_API_KEY not found in .env. Add it like:\nOPENAI_API_KEY=sk-...")
     st.stop()
 
-# Load existing vectorstore
-vectorstore = None
-if os.path.exists(VECTORSTORE_PATH):
-    vectorstore = FAISS.load_local(VECTORSTORE_PATH, OpenAIEmbeddings(openai_api_key=openai_api_key))
+# ---------- Paths ----------
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
-# ----------------------------
-# Show list of trained PDFs
-# ----------------------------
+# ---------- Load / Save vectorstore ----------
+def load_vectorstore(emb):
+    if not os.path.exists(VECTORSTORE_DIR):
+        return None
+    # allow_dangerous_deserialization needed for FAISS pickle metadata
+    return FAISS.load_local(VECTORSTORE_DIR, emb, allow_dangerous_deserialization=True)
+
+def save_vectorstore(vs):
+    vs.save_local(VECTORSTORE_DIR)
+
+# ---------- Embeddings ----------
+embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+
+# ---------- Load existing KB ----------
+vectorstore = load_vectorstore(embeddings)
+
+# ---------- Show trained PDF list ----------
 st.subheader("📂 Current Knowledge Base")
 if os.path.exists(PDF_LIST_FILE):
     with open(PDF_LIST_FILE, "r") as f:
-        pdfs = [line.strip() for line in f if line.strip()]
-    if pdfs:
-        for pdf in pdfs:
-            st.write(f"✅ {pdf}")
+        names = [ln.strip() for ln in f if ln.strip()]
+    if names:
+        for n in names:
+            st.write(f"✅ {n}")
     else:
         st.info("No PDFs have been trained yet.")
 else:
     st.info("No PDFs have been trained yet.")
 
-# ----------------------------
-# Chat Section
-# ----------------------------
+# ---------- Chat (available to everyone if trained) ----------
 if vectorstore:
     chain = ConversationalRetrievalChain.from_llm(
-        llm=ChatOpenAI(temperature=0, openai_api_key=openai_api_key),
+        llm=ChatOpenAI(temperature=0, openai_api_key=OPENAI_API_KEY),
         retriever=vectorstore.as_retriever(),
     )
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    question = st.text_input("💬 Ask me anything about the documents:")
+    question = st.text_input("💬 Ask anything about the trained documents:")
     if question:
         result = chain({"question": question, "chat_history": st.session_state.history})
         st.session_state.history.append((question, result["answer"]))
@@ -86,47 +93,46 @@ if vectorstore:
                 st.write(f"**You:** {q}")
                 st.write(f"**Teacher:** {a}")
 else:
-    st.warning("⚠️ No documents trained yet. Owner needs to upload a PDF.")
+    st.warning("⚠️ No documents trained yet. Owner must upload first.")
 
-# ----------------------------
-# Owner Upload Section
-# ----------------------------
-st.subheader("🔐 Owner Access – Upload & Train More PDFs")
+# ---------- Owner upload (password-gated) ----------
+st.subheader("🔐 Owner Access — Upload & Train More PDFs")
+if "auth" not in st.session_state:
+    st.session_state.auth = False
 
 if not st.session_state.auth:
-    password_input = st.text_input("Enter Upload Password:", type="password")
-    if password_input == APP_PASSWORD:
+    pw = st.text_input("Enter Upload Password:", type="password")
+    if pw == APP_PASSWORD:
         st.session_state.auth = True
         st.experimental_rerun()
-    elif password_input:
+    elif pw:
         st.error("❌ Incorrect password.")
 
 if st.session_state.auth:
-    uploaded_file = st.file_uploader("Upload a PDF to add to the knowledge base", type="pdf")
-    if uploaded_file:
-        with st.spinner("Processing your PDF..."):
-            temp_path = os.path.join("temp.pdf")
-            with open(temp_path, "wb") as f:
-                f.write(uploaded_file.read())
+    up = st.file_uploader("Upload a PDF to add to the knowledge base", type="pdf")
+    if up is not None:
+        # Save original file
+        saved_path = os.path.join(UPLOADS_DIR, up.name)
+        with open(saved_path, "wb") as f:
+            f.write(up.read())
 
+        with st.spinner("Processing your PDF..."):
             PyPDFLoader = get_pypdf_loader()
-            loader = PyPDFLoader(temp_path)
+            loader = PyPDFLoader(saved_path)
             docs = loader.load()
 
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            split_docs = text_splitter.split_documents(docs)
-
-            embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            chunks = splitter.split_documents(docs)
 
             if vectorstore:
-                vectorstore.add_documents(split_docs)
+                vectorstore.add_documents(chunks)
             else:
-                vectorstore = FAISS.from_documents(split_docs, embeddings)
+                vectorstore = FAISS.from_documents(chunks, embeddings)
 
-            vectorstore.save_local(VECTORSTORE_PATH)
+            save_vectorstore(vectorstore)
 
-            # Save PDF name to list
+            # Track filename
             with open(PDF_LIST_FILE, "a") as f:
-                f.write(f"{uploaded_file.name}\n")
+                f.write(up.name + "\n")
 
-            st.success(f"✅ '{uploaded_file.name}' added to the knowledge base!")
+            st.success(f"✅ '{up.name}' added to the knowledge base!")
