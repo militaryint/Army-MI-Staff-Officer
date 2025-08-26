@@ -1,7 +1,10 @@
 streamlit
 langchain
-sentence-transformers
+langchain-community
+pypdf
 faiss-cpu
+openai
+tiktoken
+python-dotenv
+sentence-transformers
 pymupdf
-transformers
-torch
