@@ -1,9 +1,9 @@
 streamlit
+python-dotenv
 langchain
 langchain-community
-pypdf
-faiss-cpu
+langchain-openai
 openai
 tiktoken
-python-dotenv
-sentence-transformers
+pypdf
+faiss-cpu
