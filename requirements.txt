@@ -7,4 +7,3 @@ openai
 tiktoken
 python-dotenv
 sentence-transformers
-pymupdf
