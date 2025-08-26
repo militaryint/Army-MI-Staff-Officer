@@ -1,90 +1,90 @@
-import streamlit as st
 import os
-import tempfile
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+import streamlit as st
+from dotenv import load_dotenv
 
-# ---------------- CONFIG ----------------
-SECRET_KEY = st.secrets["app_key"]
-DB_PATH = "faiss_store"
+# Load environment variables from .env file
+load_dotenv()
 
-st.set_page_config(page_title="Secure PDF Chatbot", layout="centered")
-st.title("🔒 Secure Hugging Face Style PDF Chatbot")
+# ----------------------------
+# PASSWORD PROTECTION
+# ----------------------------
+APP_PASSWORD = "CommanderKeshav"  # Your password
 
-# ---------------- SECRET KEY CHECK ----------------
-user_key = st.text_input("Enter Access Key (leave blank for chat only)", type="password")
-is_admin = (user_key == SECRET_KEY)
+if "auth" not in st.session_state:
+    st.session_state.auth = False
 
-# ---------------- TRAIN PDF SECTION (ADMIN ONLY) ----------------
-if is_admin:
-    st.subheader("📘 Upload & Train a PDF")
-    uploaded_file = st.file_uploader("Upload a PDF to train", type=["pdf"])
-    if uploaded_file:
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                tmp_file.write(uploaded_file.read())
-                temp_path = tmp_file.name
-
-            loader = PyPDFLoader(temp_path)
-            documents = loader.load()
-
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            docs = text_splitter.split_documents(documents)
-
-            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-            if os.path.exists(DB_PATH):
-                vectorstore = FAISS.load_local(DB_PATH, embeddings, allow_dangerous_deserialization=True)
-                vectorstore.add_documents(docs)
-            else:
-                vectorstore = FAISS.from_documents(docs, embeddings)
-
-            vectorstore.save_local(DB_PATH)
-            st.success(f"✅ PDF '{uploaded_file.name}' trained and stored in FAISS database!")
-
-            os.remove(temp_path)
-
-        except Exception as e:
-            st.error(f"❌ Error processing PDF: {e}")
-
-# ---------------- CHAT SECTION ----------------
-st.subheader("💬 Chat with Trained PDFs")
-
-if not os.path.exists(DB_PATH):
-    st.warning("⚠️ No trained database found! Please upload a PDF (admin only).")
+if not st.session_state.auth:
+    password_input = st.text_input("Enter App Password:", type="password")
+    if password_input == APP_PASSWORD:
+        st.session_state.auth = True
+        st.experimental_rerun()
+    elif password_input:
+        st.error("Incorrect password. Try again.")
     st.stop()
 
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-vectorstore = FAISS.load_local(DB_PATH, embeddings, allow_dangerous_deserialization=True)
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+# ----------------------------
+# SAFE IMPORT FOR PDF LOADER
+# ----------------------------
+try:
+    from langchain_community.document_loaders import PyPDFLoader
+except ModuleNotFoundError:
+    from langchain.document_loaders import PyPDFLoader
 
-@st.cache_resource
-def load_llm():
-    model_name = "google/flan-t5-base"
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    pipe = pipeline("text2text-generation", model=model, tokenizer=tokenizer)
-    return pipe
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chains import ConversationalRetrievalChain
+from langchain.chat_models import ChatOpenAI
 
-llm_pipeline = load_llm()
+# ----------------------------
+# STREAMLIT UI
+# ----------------------------
+st.set_page_config(page_title="Virtual Teacher", layout="wide")
+st.title("📚 Virtual Teacher - Learn from Your PDFs")
 
-def ask_llm(question, context):
-    prompt = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
-    result = llm_pipeline(prompt, max_length=256, clean_up_tokenization_spaces=True)
-    return result[0]["generated_text"]
+# Get API key from environment
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
-query = st.text_input("💡 Ask a question:")
-if query:
-    results = retriever.get_relevant_documents(query)
-    context = "\n".join([doc.page_content for doc in results])
-    answer = ask_llm(query, context)
+if not openai_api_key:
+    st.error("OpenAI API key not found! Please set it in your .env file.")
+    st.stop()
 
-    st.markdown("**🤖 Answer:**")
-    st.write(answer)
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
-    with st.expander("📄 Retrieved context"):
-        for i, res in enumerate(results, start=1):
-            st.write(f"**{i}.** {res.page_content}")
+if uploaded_file:
+    with st.spinner("Processing your PDF..."):
+        temp_path = os.path.join("temp.pdf")
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.read())
+
+        loader = PyPDFLoader(temp_path)
+        docs = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        split_docs = text_splitter.split_documents(docs)
+
+        embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+        vectorstore = FAISS.from_documents(split_docs, embeddings)
+
+        chain = ConversationalRetrievalChain.from_llm(
+            llm=ChatOpenAI(temperature=0, openai_api_key=openai_api_key),
+            retriever=vectorstore.as_retriever(),
+        )
+
+        if "history" not in st.session_state:
+            st.session_state.history = []
+
+        st.success("PDF processed! You can now ask questions.")
+
+        question = st.text_input("Ask me anything about the document:")
+
+        if question:
+            result = chain({"question": question, "chat_history": st.session_state.history})
+            st.session_state.history.append((question, result["answer"]))
+            st.write(f"**Answer:** {result['answer']}")
+
+            with st.expander("Chat History"):
+                for q, a in st.session_state.history:
+                    st.write(f"**You:** {q}")
+                    st.write(f"**Teacher:** {a}")
+else:
+    st.info("Please upload a PDF to start.")
